@@ -1,12 +1,13 @@
-service: aws-node-express-dynamodb-api-project
+service: aws-lambda-dynamodb
 frameworkVersion: '3'
 
 custom:
-  tableName: 'users-table-${sls:stage}'
+  prefixTableName: 'realworld-${self:provider.environment.DYNAMODB_NAMESPACE}'
 
 provider:
   name: aws
   runtime: nodejs14.x
+  region: ap-northeast-1
   iam:
     role:
       statements:
@@ -18,27 +19,158 @@ provider:
             - dynamodb:PutItem
             - dynamodb:UpdateItem
             - dynamodb:DeleteItem
-          Resource:
-            - Fn::GetAtt: [UsersTable, Arn]
+          Resource: 'arn:aws:dynamodb:${opt:region, self:provider.region}:*:table/*'
   environment:
-    USERS_TABLE: ${self:custom.tableName}
+    DYNAMODB_NAMESPACE: ${opt:stage, "dev"}
+
+package:
+  exclude:
+    - test/**
+    - coverage/**
+    - lambda-node-logo.png
+    - .nyc_output/**
 
 functions:
-  api:
-    handler: handler.handler
+  ## Users API
+  createUser:
+    handler: src/User.create
     events:
-      - httpApi: '*'
+      - http:
+          method: POST
+          path: /api/users
+          cors: true
+
+  loginUser:
+    handler: src/User.login
+    events:
+      - http:
+          method: POST
+          path: /api/users/login
+          cors: true
+
+  getUser:
+    handler: src/User.get
+    events:
+      - http:
+          method: GET
+          path: /api/user
+          cors: true
+
+  updateUser:
+    handler: src/User.update
+    events:
+      - http:
+          method: PUT
+          path: /api/user
+          cors: true
+
+  getProfile:
+    handler: src/User.getProfile
+    events:
+      - http:
+          method: GET
+          path: /api/profiles/{username}
+          cors: true
+
+  followUser:
+    handler: src/User.follow
+    events:
+      - http:
+          method: POST
+          path: /api/profiles/{username}/follow
+          cors: true
+
+  unfollowUser:
+    handler: src/User.follow
+    events:
+      - http:
+          method: DELETE
+          path: /api/profiles/{username}/follow
+          cors: true
 
 resources:
   Resources:
-    UsersTable:
+    UsersDynamoDBTable:
       Type: AWS::DynamoDB::Table
+      DeletionPolicy: Retain
       Properties:
         AttributeDefinitions:
-          - AttributeName: userId
+          - AttributeName: username
+            AttributeType: S
+          - AttributeName: email
             AttributeType: S
         KeySchema:
-          - AttributeName: userId
+          - AttributeName: username
             KeyType: HASH
-        BillingMode: PAY_PER_REQUEST
-        TableName: ${self:custom.tableName}
+        ProvisionedThroughput:
+          ReadCapacityUnits: 1
+          WriteCapacityUnits: 1
+        TableName: ${self:custom.prefixTableName}-users
+        GlobalSecondaryIndexes:
+          - IndexName: email
+            KeySchema:
+              - AttributeName: email
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+            ProvisionedThroughput:
+              ReadCapacityUnits: 1
+              WriteCapacityUnits: 1
+
+    # ArticlesDynamoDBTable:
+    #   Type: AWS::DynamoDB::Table
+    #   DeletionPolicy: Retain
+    #   Properties:
+    #     AttributeDefinitions:
+    #       - AttributeName: slug
+    #         AttributeType: S
+    #       - AttributeName: dummy
+    #         AttributeType: S
+    #       - AttributeName: updatedAt
+    #         AttributeType: N
+    #     KeySchema:
+    #       - AttributeName: slug
+    #         KeyType: HASH
+    #     ProvisionedThroughput:
+    #       ReadCapacityUnits: 1
+    #       WriteCapacityUnits: 1
+    #     TableName: ${self:custom.prefixTableName}-articles
+    #     GlobalSecondaryIndexes:
+    #       - IndexName: updatedAt
+    #         KeySchema:
+    #           - AttributeName: dummy
+    #             KeyType: HASH
+    #           - AttributeName: updatedAt
+    #             KeyType: RANGE
+    #         Projection:
+    #           ProjectionType: ALL
+    #         ProvisionedThroughput:
+    #           ReadCapacityUnits: 1
+    #           WriteCapacityUnits: 1
+
+    # CommentsDynamoDBTable:
+    #   Type: 'AWS::DynamoDB::Table'
+    #   DeletionPolicy: Retain
+    #   Properties:
+    #     AttributeDefinitions:
+    #       - AttributeName: id
+    #         AttributeType: S
+    #       - AttributeName: slug
+    #         AttributeType: S
+    #     KeySchema:
+    #       - AttributeName: id
+    #         KeyType: HASH
+    #     ProvisionedThroughput:
+    #       ReadCapacityUnits: 1
+    #       WriteCapacityUnits: 1
+    #     TableName: ${self:custom.prefixTableName}-comments
+    #     GlobalSecondaryIndexes:
+    #       - IndexName: article
+    #         KeySchema:
+    #           - AttributeName: slug
+    #             KeyType: HASH
+    #         Projection:
+    #           ProjectionType: ALL
+    #         ProvisionedThroughput:
+    #           ReadCapacityUnits: 1
+    #           WriteCapacityUnits: 1
