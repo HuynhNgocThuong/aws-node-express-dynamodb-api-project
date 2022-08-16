@@ -88,11 +88,84 @@ functions:
           path: /api/profiles/{username}/follow
           cors: true
 
+## Articles API
+  createArticle:
+    handler: src/Article.create
+    events:
+      - http:
+          method: POST
+          path: /api/articles
+          cors: true
+
+  getArticle:
+    handler: src/Article.get
+    events:
+      - http:
+          method: GET
+          path: /api/articles/{slug}
+          cors: true
+
+  udpateArticle:
+    handler: src/Article.update
+    events:
+      - http:
+          method: PUT
+          path: /api/articles/{slug}
+          cors: true
+
+  deleteArticle:
+    handler: src/Article.deleteArticle
+    events:
+      - http:
+          method: DELETE
+          path: /api/articles/{slug}
+          cors: true
+
+  favoriteArticle:
+    handler: src/Article.favorite
+    events:
+      - http:
+          method: POST
+          path: /api/articles/{slug}/favorite
+          cors: true
+
+  unfavoriteArticle:
+    handler: src/Article.favorite
+    events:
+      - http:
+          method: DELETE
+          path: /api/articles/{slug}/favorite
+          cors: true
+
+  listArticles:
+    handler: src/Article.list
+    events:
+      - http:
+          method: GET
+          path: /api/articles
+          cors: true
+
+  getArticlesFeed:
+    handler: src/Article.getFeed
+    events:
+      - http:
+          method: GET
+          path: /api/articles/feed
+          cors: true
+
+  getTags:
+    handler: src/Article.getTags
+    events:
+      - http:
+          method: GET
+          path: /api/tags
+          cors: true
+
 resources:
   Resources:
     UsersDynamoDBTable:
       Type: AWS::DynamoDB::Table
-      DeletionPolicy: Retain
+      # DeletionPolicy: Retain
       Properties:
         AttributeDefinitions:
           - AttributeName: username
@@ -119,7 +192,7 @@ resources:
 
     ArticlesDynamoDBTable:
       Type: AWS::DynamoDB::Table
-      DeletionPolicy: Retain
+      # DeletionPolicy: Retain
       Properties:
         AttributeDefinitions:
           - AttributeName: slug

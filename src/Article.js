@@ -61,6 +61,7 @@ async function create(event) {
 
   return Util.envelop({ article });
 }
+
 async function get(event) {
   const slug = event.pathParameters.slug;
   /* istanbul ignore if  */
@@ -132,15 +133,15 @@ async function update(event) {
       article[field] = articleMutation[field];
     }
   });
-  await Util.DocumentClient.put({
+  await Util.getDocumentClient().put({
     TableName: articlesTable,
     Item: article,
   }).promise();
 
   const updatedArticle = (
-    await Util.DocumentClient.get({
+    await Util.getDocumentClient().get({
       TableName: articlesTable,
-      Key: { slug },
+      Key: { slug: slug },
     }).promise()
   ).Item;
 
@@ -149,18 +150,236 @@ async function update(event) {
   });
 }
 
-async function deleteArticles(event) {}
-async function favorite(event) {}
-async function list(event) {}
-async function getFeed(event) {}
-async function getTags(event) {}
+async function deleteArticle(event) {
+  const authenticatedUser = await User.authenticateAndGetUser(event);
+  if (!authenticatedUser) {
+    return Util.envelop('Must be logged in.', 422);
+  }
+  const slug = event.pathParameters.slug;
+  if (!slug) {
+    return Util.envelop('Slug must be specified.', 422);
+  }
 
+  //Verify article is exist
+  const article = (await Util.DocumentClient.get({
+    TableName: articlesTable,
+    Key: { slug },
+  }).promise()).Item;
+  if (!article) {
+    return Util.envelop(`Article not found: [${slug}]`, 422);
+  }
+
+  // Ensure article is authored by authenticatedUser
+  if (article.author !== authenticatedUser.username) {
+    return Util.envelop(
+      'Article can only be delete by author: ' + `[${article.author}]`,
+      422
+    );
+  }
+
+  await Util.getDocumentClient().delete({
+    TableName: articlesTable,
+    Key: {slug: slug},
+  }).promise();
+
+  return Util.envelop({});
+}
+
+/** Favorite/unfavorite article */
+async function favorite(event) {
+  const authenticatedUser = await User.authenticateAndGetUser(event);
+  if (!authenticatedUser) {
+    return Util.envelop('Must be logged in.', 422);
+  }
+  const slug = event.pathParameters.slug;
+  if (!slug) {
+    return Util.envelop('Slug must be specified.', 422);
+  }
+
+  const article = (
+    await Util.getDocumentClient().get({
+      TableName: articlesTable,
+      Key: { slug },
+    })
+  ).Item;
+  if (!article) {
+    return Util.envelop(`Article not found: [${slug}]`, 422);
+  }
+
+  // Set/unset favorite bit and count for article
+  const shouldFavorite = !(event.httpMethod === 'DELETE');
+  if(shouldFavorite){
+    if(!article.favoritedBy){
+      article.favoritedBy = [];
+      article.favoritesCount = 0;
+    }
+    article.favoritedBy.push(authenticatedUser.username)
+    article.favoritesCount += 1;
+  }
+  else{
+    article.favoritedBy = article.favoritedBy.filter(
+      element => (element !== authenticatedUser.username));
+    if (article.favoritedBy.length === 0) {
+      delete article.favoritedBy;
+    }
+  }
+
+  article.favoritesCount = article.favoritesCount ? article.favoritesCount.length : 0;
+  //TODO: Write article into dynamoDB
+  await Util.getDocumentClient().put({
+    TableName: articlesTable,
+    Item: article,
+  }).promise();
+
+  article = await transformRetrievedArticle(article);
+  article.favorited = shouldFavorite;
+  return Util.envelop({ article });
+}
+
+/** List articles */
+async function list(event) {
+  const authenticatedUser = await User.authenticateAndGetUser(event);
+  const params = event.queryStringParameters || {};
+  const limit = parseInt(params.limit) || 20;
+  const offset = parseInt(params.offset) || 0;
+  if((params.author && params.tag) || (params.author && params.favorited) || (params.favorited && params.tag)){
+    return Util.envelop(
+      'Only one of these can be specified: [tag, author, favorited]', 422);
+  }
+  const queryParams = {
+    TableName: articlesTable,
+    IndexName: 'updatedAt',
+    KeyConditionExpression: 'dummy= :dummy',
+    ExpressionAttributeValues: {
+      ':dummy': 'OK',
+    },
+    ScanIndexForward: false,
+  };
+  if (params.tag) {
+    queryParams.FilterExpression = 'contains(tagList, :tag)';
+    queryParams.ExpressionAttributeValues[':tag'] = params.tag;
+  }
+  else if(params.author){
+    queryParams.FilterExpression = 'author = :author';
+    queryParams.ExpressionAttributeValues[':author'] = params.author;
+  }
+  else if(params.favorited){
+    queryParams.FilterExpression = 'contains(favoritedBy, :favorited)';
+    queryParams.ExpressionAttributeValues[':favorited'] = params.favorited;
+  }
+  return Util.envelop({
+    articles: await queryEnoughArticles(queryParams, authenticatedUser, limit, offset)
+  });
+}
+
+/** Get Articles feed */
+async function getFeed(event) {
+  const authenticatedUser = await User.authenticateAndGetUser(event);
+  if (!authenticatedUser) {
+    return Util.envelop('Must be logged in.', 422);
+  }
+
+  const params = event.queryStringParameters || {};
+  const limit = parseInt(params.limit) || 20;
+  const offset = parseInt(params.offset) || 0;
+
+  // Get followed users
+  const followed = await User.getFollowedUsers(authenticatedUser.username);
+  if (!followed.length) {
+    return Util.envelop({ articles: [] });
+  }
+  // Query articlesTable to filter only authored by followed users
+  // This results in:
+  //   FilterExpression:
+  //      'author IN (:author0, author1, ...)',
+  //   ExpressionAttributeValues:
+  //      { ':dummy': 'OK', ':author0': 'authoress-kly3oz', ':author1': ... }
+
+  const queryParams = {
+    TableName: articlesTable,
+    IndexName: 'createAt',
+    KeyConditionExpression: 'dummy = :dummy',
+    FilterExpression: 'author IN',
+    ExpressionAttributeValues: {
+      ':dummy': 'OK'
+    },
+    ScanIndexForward: false,
+  }
+
+  // String pattern
+  for(let index = 0; index < followed; ++i){
+    queryParams.ExpressionAttributeValues[`{:author${index}}`] = followed[index];
+  }
+
+  queryParams.FilterExpression += 
+  '('
+    +
+      Object.keys(queryParams.ExpressionAttributeValues).filter(element => element != ':dummy').join(',')
+    +
+  ')';
+  console.log(`FilterExpression: [${queryParams.FilterExpression}]`);
+  return Util.envelop({
+    articles: await queryEnoughArticles(queryParams, authenticatedUser, limit, offset),
+  });
+}
+
+/** Get list of tags */
+async function getTags(event) {
+  const uniqTags = {};
+
+  let lastEvaluatedKey = null;
+  do {
+    const scanParams = {
+      TableName: articlesTable,
+      AttributesToGet: ['tagList'],
+    };
+    /* istanbul ignore next */
+    if (lastEvaluatedKey) {
+      scanParams.ExclusiveStartKey = lastEvaluatedKey;
+    }
+    const data = await Util.getDocumentClient().scan(scanParams).promise();
+    data.Items.forEach(item => {
+      /* istanbul ignore next */
+      if (item.tagList && item.tagList.values) {
+        item.tagList.values.forEach(tag => uniqTags[tag] = 1);
+      }
+    });
+    lastEvaluatedKey = data.LastEvaluatedKey;
+  } while (lastEvaluatedKey);
+  const tags = Object.keys(uniqTags);
+
+  return Util.envelop({ tags });
+}
+
+/**
+ * Given queryParams, repeatedly call query until we have enough records
+ * to satisfy (limit + offset)
+ */
 async function queryEnoughArticles(
   queryParams,
   authenticatedUser,
   limit,
   offset
-) {}
+) {
+  // Call query repeatedly, until we have enough records, or there are no more
+  const queryResultItems = [];
+  while(queryResultItems.length < (offset + limit)){
+    const queryResult = await Util.getDocumentClient().query(queryParams).promise();
+    queryResultItems.push(...queryResult.Items);
+
+    if(queryResult.LastEvaluatedKey){
+      queryParams.ExclusiveStartKey = queryResult.LastEvaluatedKey;
+    } else {
+      break;
+    }
+  }
+
+  // Decorate last "limit" number of articles with author data
+  const articlePromises = [];
+  queryResultItems.slice(offset, offset + limit).forEach(element => articlePromises.push(transformRetrievedArticle(element, authenticatedUser)));
+  const articles = await Promise.all(articlePromises);
+  return articles;
+}
 
 /**
  * Given an article retrieved from table,
@@ -181,4 +400,15 @@ async function transformRetrievedArticle(article, authenticatedUser) {
     article.author,
     authenticatedUser
   );
+}
+
+export {
+  create,
+  get,
+  update,
+  deleteArticle,
+  favorite,
+  list,
+  getFeed,
+  getTags
 }
